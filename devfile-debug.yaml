@@ -1,0 +1,204 @@
+apiVersion: 1.0.0
+metadata:
+  generateName: postit-app-
+projects:
+  - name: postit-app
+    source:
+      location: 'https://github.com/nmalvankar/quarkus-reactjs-postit-app'
+      type: git
+      branch: master
+components:
+  - mountSources: true
+    endpoints:
+      - name: quarkus-dev
+        port: 8080
+    command:
+      - sleep
+    args:
+      - infinity
+    memoryLimit: 5Gi
+    type: dockerimage
+    volumes:
+      - name: m2
+        containerPath: /.m2
+    alias: quarkus-backend-dev
+    image: 'registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:2.1-10'
+    env:
+      - value: '-Dmaven.repo.local=/.m2/repository'
+        name: MAVEN_OPTS
+      - value: user
+        name: username
+      - value: password
+        name: password
+      - value: password
+        name: admin_password
+      - value: 'mongodb://localhost'
+        name: uri
+  - mountSources: true
+    memoryLimit: 64M
+    type: dockerimage
+    volumes:
+      - name: m2
+        containerPath: /work/volumes/.m2
+    alias: data
+    image: quay.io/sunix/postit-app-dev-data
+  - mountSources: true
+    endpoints:
+      - name: 3000-tcp
+        port: 3000
+    memoryLimit: 768Mi
+    type: dockerimage
+    alias: node-frontend-dev
+    image: 'quay.io/eclipse/che-nodejs8-centos:7.2.0'
+    env:
+      - value: '3000'
+        name: FRONTEND_PORT
+  - memoryLimit: 512Mi
+    type: dockerimage
+    alias: mongo
+    image: centos/mongodb-34-centos7
+    env:
+      - value: user
+        name: MONGODB_USER
+      - value: password
+        name: MONGODB_PASSWORD
+      - value: sampledb
+        name: MONGODB_DATABASE
+      - value: password
+        name: MONGODB_ADMIN_PASSWORD
+  - id: redhat/quarkus-java11/latest
+    type: chePlugin
+  - id: redhat/vscode-openshift-connector/latest
+    type: chePlugin
+    alias: vscode-openshift
+  - mountSources: true
+    args:
+      - sleep
+      - infinity
+    memoryLimit: 64M
+    type: dockerimage
+    alias: git
+    image: sunix/git-devtools
+apiVersion: 1.0.0
+commands:
+  - name: start DEVMODE quarkus-backend
+    actions:
+      - workdir: /projects/postit-app/quarkus-backend
+        type: exec
+        command: 'pkill java; mvn compile quarkus:dev'
+        component: quarkus-backend-dev
+  - name: connect java debugger quarkus-backend
+    actions:
+      - referenceContent: |
+          {
+          "version": "0.2.0",
+          "configurations": [
+            {
+              "type": "java",
+              "name": "Debug (Attach) - Remote",
+              "request": "attach",
+              "hostName": "localhost",
+              "port": 5005
+            }]
+          }
+        type: vscode-launch
+  - name: start DEVMODE node-frontend
+    actions:
+      - workdir: /projects/postit-app/node-frontend/
+        type: exec
+        command: npm run devmode
+        component: node-frontend-dev
+  - name: start PROD node-frontend
+    actions:
+      - workdir: /projects/postit-app/node-frontend/
+        type: exec
+        command: npm start
+        component: node-frontend-dev
+  - name: oc - deploy app (quarkus JVM) from github
+    actions:
+      - workdir: /projects/postit-app/node-frontend/
+        type: exec
+        command: >-
+          # mongodb
+
+          oc new-app -e MONGODB_USER=user -e MONGODB_PASSWORD=password -e
+          MONGODB_DATABASE=sampledb -e MONGODB_ADMIN_PASSWORD=password
+          centos/mongodb-36-centos7 --name=mongo
+
+          # s2i quarkus app from source
+
+          oc new-app
+          java~https://github.com/nmalvankar/quarkus-reactjs-postit-app
+          --name=quarkus-backend --context-dir=quarkus-backend -e
+          uri=mongodb://mongo -e username=user -e password=password
+          --env=JAVA_OPTIONS="-Dquarkus.http.host=0.0.0.0"
+
+          oc expose svc/quarkus-backend
+
+          # s2i node frontend from source
+
+          oc new-app
+          nodejs~https://github.com/nmalvankar/quarkus-reactjs-postit-app
+          --context-dir=node-frontend --name=node-frontend -e PORT=8080 -e
+          COMPONENT_QUARKUS_BACKEND_HOST=quarkus-backend
+
+          oc expose svc/node-frontend
+
+          oc logs -f bc/quarkus-backend
+
+          oc logs -f bc/node-frontend
+
+          echo node-frontend url http://$(oc get route node-frontend
+          --template='{{ .spec.host }}')
+        component: vscode-openshift
+  - name: oc - redeploy quarkus-backend (from local sources)
+    actions:
+      - workdir: /projects/postit-app/
+        type: exec
+        command: |-
+          oc start-build quarkus-backend --from-dir=.
+          oc logs -f bc/quarkus-backend
+        component: vscode-openshift
+  - name: oc - redeploy node-frontend (from local sources)
+    actions:
+      - workdir: /projects/postit-app/
+        type: exec
+        command: |-
+          oc start-build node-frontend --from-dir=.
+          oc logs -f bc/node-frontend
+        component: vscode-openshift
+  - name: oc - scale node-frontend
+    actions:
+      - workdir: /projects/postit-app/
+        type: exec
+        command: |-
+          echo "Scale node-frontend. Enter the number of desired replicas:";
+          read replicas;
+          oc scale dc/node-frontend --replicas=${replicas}
+        component: vscode-openshift
+  - name: oc - scale quarkus-backend
+    actions:
+      - workdir: /projects/postit-app/
+        type: exec
+        command: |-
+          echo "Scale quarkus-frontend. Enter the number of desired replicas:";
+          read replicas;
+          oc scale dc/quarkus-backend --replicas=${replicas}
+        component: vscode-openshift
+  - name: oc - get node-frontend URL
+    actions:
+      - workdir: /projects/postit-app/node-frontend/
+        type: exec
+        command: >-
+          echo node-frontend url http://$(oc get route node-frontend
+          --template='{{ .spec.host }}')
+        component: vscode-openshift
+  - name: oc login
+    actions:
+      - workdir: /tmp
+        type: exec
+        command: >-
+          rm oc; curl
+          https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz
+          -s | tar zxv && ./oc login --server=${KUBERNETES_SERVICE_HOST}:443
+        component: vscode-openshift
